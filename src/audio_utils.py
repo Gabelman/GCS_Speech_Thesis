@@ -73,7 +73,7 @@ def get_speech_timestamps(audio_waveform, vad_model, utils, sampling_rate):
     # Silero VAD works with torch.Tensors
     audio_tensor = torch.from_numpy(audio_waveform).float()
 
-    # VAD expects 16kHz audio. We need to handle resampling if the input is different. (librosa)
+    # VAD expects 16kHz audio. Resampling if the input is different. (librosa)
     if sampling_rate != 16000:
         try:
             import librosa
@@ -93,12 +93,9 @@ def get_speech_timestamps(audio_waveform, vad_model, utils, sampling_rate):
      VADIterator,
      collect_chunks) = utils
 
-    # Get speech timestamps in samples, then convert to seconds
     try:
-        # The VAD model returns timestamps in samples, not seconds.
         speech_timestamps = get_speech_timestamps_func(audio_tensor, vad_model, sampling_rate=16000)
         
-        # Let's convert these to seconds for easier use later
         speech_timestamps_seconds = []
         for ts in speech_timestamps:
             speech_timestamps_seconds.append({
@@ -112,12 +109,7 @@ def get_speech_timestamps(audio_waveform, vad_model, utils, sampling_rate):
         print(f"Error during VAD processing: {e}")
         return []
 
-# --- Update the Test Block at the bottom of the file ---
-
 if __name__ == "__main__":
-    # You'll need to create a 'data' folder in your main project directory
-    # and put a sample WAV file there for this test to work.
-    # Let's assume you have 'GCS_Speech_Thesis/data/sample.wav'
     
     import os
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) 
@@ -126,7 +118,6 @@ if __name__ == "__main__":
     print(f"--- Testing audio_utils.py ---")
     print(f"Attempting to load: {sample_audio_path}")
 
-    # Create dummy data folder and check for sample.wav
     data_folder = os.path.join(project_root, "data")
     if not os.path.exists(data_folder):
         os.makedirs(data_folder)
