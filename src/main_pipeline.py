@@ -85,7 +85,7 @@ def process_audio_file(file_path, vad_model, vad_utils, whisper_model):
 
 if __name__ == "__main__":
     # --- Configuration ---
-    WHISPER_MODEL_SIZE = "base" # "tiny", "base", "small", "medium"
+    WHISPER_MODEL_SIZE = "medium" # "tiny", "base", "small", "medium"
     
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     input_audio_path = os.path.join(project_root, "data/CommonVoice21.0/cv-corpus-21.0-2025-03-14/de/clips", "TestSample.mp3")

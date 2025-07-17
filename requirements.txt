@@ -46,6 +46,7 @@ platformdirs==4.3.8
 pooch==1.8.2
 protobuf==6.31.1
 pycparser==2.22
+pyenchant==3.2.2
 PyYAML==6.0.2
 requests==2.32.4
 scikit-learn==1.7.0
