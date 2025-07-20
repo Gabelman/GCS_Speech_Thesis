@@ -5,9 +5,9 @@ import numpy as np
 
 from audio_utils import load_audio, initialize_vad_model, get_speech_timestamps
 from transcription import initialize_whisper_model, transcribe_chunk
-from feature_extractor import initialize_dictionary, calculate_lexical_validity
+from feature_extractor import initialize_dictionary, calculate_lexical_validity, initialize_language_model, calculate_perplexity
 
-def process_audio_file(file_path, vad_model, vad_utils, whisper_model, german_dictionary):
+def process_audio_file(file_path, vad_model, vad_utils, whisper_model, german_dictionary, lm_tokenizer, lm_model):
     """
     Orchestrates the full pipeline for a single audio file.
 
@@ -67,7 +67,9 @@ def process_audio_file(file_path, vad_model, vad_utils, whisper_model, german_di
         transcription_result = transcribe_chunk(audio_chunk, whisper_model, language="de")
 
         if transcription_result:
+            transcript_text = transcription_result['text']
             lexical_score = calculate_lexical_validity(transcription_result['text'], german_dictionary)
+            perplexity_score = calculate_perplexity(transcript_text, lm_tokenizer, lm_model)
             final_result = {
                 'file': os.path.basename(file_path),
                 'segment_index': i + 1,
@@ -75,6 +77,7 @@ def process_audio_file(file_path, vad_model, vad_utils, whisper_model, german_di
                 'end_time_s': end_sec,
                 'duration_s': end_sec - start_sec,
                 'lexical_validity': lexical_score,
+                'perplexity': perplexity_score,
                 **transcription_result  # Merges the transcription_result dictionary here
             }
             all_results.append(final_result)
@@ -88,11 +91,12 @@ def process_audio_file(file_path, vad_model, vad_utils, whisper_model, german_di
 if __name__ == "__main__":
     # --- Configuration ---
     WHISPER_MODEL_SIZE = "base" # "tiny", "base", "small", "medium"
+    LM_MODEL_ID = "dbmdz/german-gpt2"
     
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     input_audio_path = os.path.join(project_root, "data/CommonVoice21.0/cv-corpus-21.0-2025-03-14/de/clips", "TestSample.mp3")
     output_dir = os.path.join(project_root, "results")
-    output_json_path = os.path.join(output_dir, f"results_{WHISPER_MODEL_SIZE}_lexical.json")
+    output_json_path = os.path.join(output_dir, f"results_{WHISPER_MODEL_SIZE}_full_features.json")
     
     # Create results directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -105,13 +109,14 @@ if __name__ == "__main__":
     vad_model, vad_utils = initialize_vad_model()
     whisper_model = initialize_whisper_model(model_size=WHISPER_MODEL_SIZE)
     german_dict = initialize_dictionary()
+    lm_tokenizer, lm_model = initialize_language_model(model_id=LM_MODEL_ID)
     print("Models initialized.")
 
-    if vad_model is None or whisper_model is None or german_dict is None:
+    if vad_model is None or whisper_model is None or german_dict is None or lm_tokenizer is None or lm_model is None:
         print("Failed to initialize one or more models. Exiting.")
     else:
         # 2. Process the audio file
-        results = process_audio_file(input_audio_path, vad_model, vad_utils, whisper_model, german_dict)
+        results = process_audio_file(input_audio_path, vad_model, vad_utils, whisper_model, german_dict, lm_tokenizer, lm_model)
 
         if results:
             # 3. Save results to a JSON file
@@ -123,8 +128,11 @@ if __name__ == "__main__":
             # Optional: Print a summary 
             print("\n--- Summary ---")
             for res in results:
-                print(f"Segment {res['segment_index']}: '{res['text']}' (Lexical Validity: {res['lexical_validity']:.2f}, Confidence: {res['avg_logprob']:.3f})")
-                
+                                print(f"Segment {res['segment_index']}: '{res['text']}' "
+                      f"(Lex: {res['lexical_validity']:.2f}, "
+                      f"PPL: {res['perplexity']:,.0f}, "
+                      f"Conf: {res['avg_logprob']:.3f})")
+                                
 
     pipeline_end_time = time.time()
     total_time = pipeline_end_time - pipeline_start_time
