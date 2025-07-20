@@ -1,5 +1,7 @@
 import string
 import enchant 
+import torch
+from transformers import AutoTokenizer, GPT2LMHeadModel
 
 def initialize_dictionary(lang_code="de_DE"):
     """
@@ -53,6 +55,65 @@ def calculate_lexical_validity(text, german_dictionary):
     ratio = valid_word_count / len(words)
     return ratio
 
+def initialize_language_model(model_id="dbmdz/german-gpt2"):
+    """
+    Initializes and loads a pre-trained German language model and tokenizer
+    from Hugging Face.
+
+    Args:
+        model_id (str): The identifier for the Hugging Face model.
+                        "dbmdz/german-gpt2" is a good German GPT-2 model.
+                        "distilgpt2" is smaller/faster but not German-specific.
+
+    Returns:
+        tuple: A tuple containing:
+            - tokenizer: The loaded tokenizer.
+            - model: The loaded language model.
+        Returns (None, None) if an error occurs.
+    """
+    try:
+        print(f"Initializing Hugging Face model '{model_id}'...")
+        tokenizer = AutoTokenizer.from_pretrained(model_id)
+        model = GPT2LMHeadModel.from_pretrained(model_id)
+        print("Hugging Face model and tokenizer initialized successfully.")
+        return tokenizer, model
+    except Exception as e:
+        print(f"Error initializing Hugging Face model: {e}")
+        return None, None
+
+def calculate_perplexity(text, tokenizer, model):
+    """
+    Calculates the perplexity of a given text using a pre-trained LM.
+    Lower perplexity indicates a more plausible sentence.
+
+    Args:
+        text (str): The transcribed text.
+        tokenizer: The initialized Hugging Face tokenizer.
+        model: The initialized Hugging Face language model.
+
+    Returns:
+        float: The perplexity score. Returns a very high value for empty/short text.
+    """
+    if not text or not tokenizer or not model:
+        return float('inf') 
+
+    try:
+        inputs = tokenizer(text, return_tensors="pt")
+    except Exception as e:
+        print(f"Warning: Tokenizer failed for text '{text}'. Error: {e}")
+        return float('inf')
+        
+    if inputs.input_ids.size(1) == 0:
+        return float('inf')
+
+    with torch.no_grad():
+        outputs = model(**inputs, labels=inputs["input_ids"])
+        neg_log_likelihood = outputs.loss
+
+    perplexity = torch.exp(neg_log_likelihood)
+
+    return perplexity.item()
+
 # --- Test Block ---
 if __name__ == "__main__":
     print("--- Testing feature_extractor.py (Lexical Validity) ---")
@@ -84,3 +145,26 @@ if __name__ == "__main__":
         print(f"'{test_case_3}' -> Lexical Validity: {validity_3:.2f}") # Should be 1.0
         print(f"'{test_case_4}' -> Lexical Validity: {validity_4:.2f}") # Should be 0.0
         print(f"'{test_case_5}' -> Lexical Validity: {validity_5:.2f}")
+
+    # --- LM Coherence (Perplexity) Test ---
+    print("\n--- Testing LM Coherence (Perplexity) ---")
+    lm_tokenizer, lm_model = initialize_language_model()
+
+    if lm_tokenizer and lm_model:
+
+        # Should have low perplexity.
+        ppl_1 = calculate_perplexity(test_case_1, lm_tokenizer, lm_model)
+        
+        # "Word salad" with real words should have very high perplexity.
+        ppl_3 = calculate_perplexity(test_case_3, lm_tokenizer, lm_model)
+        
+        # Gibberish non-words will also have very high perplexity.
+        ppl_4 = calculate_perplexity(test_case_4, lm_tokenizer, lm_model)
+        
+        test_case_good = "Ich brauche dringend medizinische Hilfe."
+        ppl_good = calculate_perplexity(test_case_good, lm_tokenizer, lm_model)
+
+        print(f"'{test_case_1}' -> Perplexity: {ppl_1:,.2f}")
+        print(f"'{test_case_good}' -> Perplexity: {ppl_good:,.2f}")
+        print(f"'{test_case_3}' -> Perplexity: {ppl_3:,.2f}  <-- Should be much higher")
+        print(f"'{test_case_4}' -> Perplexity: {ppl_4:,.2f}  <-- Should be very high")
