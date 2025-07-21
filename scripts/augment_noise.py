@@ -69,7 +69,7 @@ if __name__ == "__main__":
     # 1. Get list of clean speech and noise files
     try:
         clean_files = [f for f in os.listdir(clean_speech_dir) if f.endswith('.mp3') or f.endswith('.wav')]
-        noise_files = [f for f in os.listdir(noise_dir) if f.endswith('.wav')]
+        noise_files = [f for f in os.listdir(noise_dir) if f.endswith('.wav')or f.endswith('.mp3')]
     except FileNotFoundError as e:
         print(f"Error: Directory not found - {e}. Please create the necessary data folders.")
         clean_files, noise_files = [], []
@@ -77,8 +77,8 @@ if __name__ == "__main__":
 
     if not clean_files or not noise_files:
         print("Error: Clean speech or noise sample directories are empty.")
-        print(f"Please add clean WAV files to: {clean_speech_dir}")
-        print(f"Please add noise WAV files to: {noise_dir}")
+        print(f"Please add clean audio files to: {clean_speech_dir}")
+        print(f"Please add noise audio files to: {noise_dir}")
     else:
         print(f"Found {len(clean_files)} clean speech files and {len(noise_files)} noise files.")
         
@@ -109,13 +109,10 @@ if __name__ == "__main__":
                 print(f"  -> Augmenting '{clean_filename}' with '{noise_filename}' at {snr}dB SNR...")
                 
                 noisy_audio = add_noise(clean_audio, noise_audio, snr)
-                
-                # Construct the output filename
                 base_name = os.path.splitext(clean_filename)[0]
                 output_filename = f"{base_name}_noise_{os.path.splitext(noise_filename)[0]}_snr{snr}.wav"
                 output_filepath = os.path.join(output_dir, output_filename)
                 
-                # Save the new noisy audio file
                 sf.write(output_filepath, noisy_audio, sr)
 
         print("\n--- Noise augmentation complete! ---")
