@@ -6,8 +6,9 @@ import numpy as np
 from audio_utils import load_audio, initialize_vad_model, get_speech_timestamps
 from transcription import initialize_whisper_model, transcribe_chunk
 from feature_extractor import initialize_dictionary, calculate_lexical_validity, initialize_language_model, calculate_perplexity
+from classifier import calculate_combined_comprehensibility_score, classify_gcs_level 
 
-def process_audio_file(file_path, vad_model, vad_utils, whisper_model, german_dictionary, lm_tokenizer, lm_model):
+def process_audio_file(file_path, vad_model, vad_utils, whisper_model, german_dictionary, lm_tokenizer, lm_model, feature_weights):
     """
     Orchestrates the full pipeline for a single audio file.
 
@@ -68,17 +69,25 @@ def process_audio_file(file_path, vad_model, vad_utils, whisper_model, german_di
 
         if transcription_result:
             transcript_text = transcription_result['text']
-            lexical_score = calculate_lexical_validity(transcription_result['text'], german_dictionary)
-            perplexity_score = calculate_perplexity(transcript_text, lm_tokenizer, lm_model)
+            features = {
+                'avg_logprob': transcription_result['avg_logprob'],
+                'lexical_validity': calculate_lexical_validity(transcript_text, german_dictionary),
+                'perplexity': calculate_perplexity(transcript_text, lm_tokenizer, lm_model)
+            }
+            combined_score, normalized_features = calculate_combined_comprehensibility_score(features, feature_weights)
+            gcs_level = classify_gcs_level(combined_score, transcription_result['no_speech_prob'])
             final_result = {
                 'file': os.path.basename(file_path),
                 'segment_index': i + 1,
                 'start_time_s': start_sec,
                 'end_time_s': end_sec,
                 'duration_s': end_sec - start_sec,
-                'lexical_validity': lexical_score,
-                'perplexity': perplexity_score,
-                **transcription_result  # Merges the transcription_result dictionary here
+                'gcs_level_prediction': gcs_level,
+                'combined_score': combined_score,
+                'features': features,
+                'normalized_features': normalized_features,
+                'transcription': transcript_text,
+                'transcription_time_s': transcription_result['transcription_time_s']
             }
             all_results.append(final_result)
         else:
@@ -92,11 +101,21 @@ if __name__ == "__main__":
     # --- Configuration ---
     WHISPER_MODEL_SIZE = "base" # "tiny", "base", "small", "medium"
     LM_MODEL_ID = "dbmdz/german-gpt2"
+
+    # Define feature weights (tuned later)
+    FEATURE_WEIGHTS = {'confidence': 0.3, 'lexical': 0.3, 'perplexity': 0.4}
     
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-    input_audio_path = os.path.join(project_root, "data/CommonVoice21.0/cv-corpus-21.0-2025-03-14/de/clips", "TestSample.mp3")
+    # Example input audio file (change as needed)
+    # input_audio_path = os.path.join(project_root, "data/CommonVoice21.0/cv-corpus-21.0-2025-03-14/de/clips", "TestSample.mp3")
+    # input_audio_path = os.path.join(project_root, "data", "sample.wav") # GCS 4/5
+    input_audio_path = os.path.join(project_root, "data", "gcs_level_3_word_salad", "gcs3_salad_01.wav") # GCS 3
+    # input_audio_path = os.path.join(project_root, "data", "gcs_level_2_incomprehensible", "3-112557-A-23.wav") # GCS 2
     output_dir = os.path.join(project_root, "results")
-    output_json_path = os.path.join(output_dir, f"results_{WHISPER_MODEL_SIZE}_full_features.json")
+    # Copilot generated this line
+    input_basename = os.path.splitext(os.path.basename(input_audio_path))[0]
+    output_json_path = os.path.join(output_dir, f"result_{input_basename}.json")
+    os.makedirs(output_dir, exist_ok=True)
     
     # Create results directory if it doesn't exist
     os.makedirs(output_dir, exist_ok=True)
@@ -104,7 +123,7 @@ if __name__ == "__main__":
     # --- Main Execution ---
     pipeline_start_time = time.time()
     
-    # 1. Initialize models (do this once)
+    # 1. Initialize models
     print("Initializing models...")
     vad_model, vad_utils = initialize_vad_model()
     whisper_model = initialize_whisper_model(model_size=WHISPER_MODEL_SIZE)
@@ -116,7 +135,7 @@ if __name__ == "__main__":
         print("Failed to initialize one or more models. Exiting.")
     else:
         # 2. Process the audio file
-        results = process_audio_file(input_audio_path, vad_model, vad_utils, whisper_model, german_dict, lm_tokenizer, lm_model)
+        results = process_audio_file(input_audio_path, vad_model, vad_utils, whisper_model, german_dict, lm_tokenizer, lm_model, FEATURE_WEIGHTS)
 
         if results:
             # 3. Save results to a JSON file
@@ -128,10 +147,9 @@ if __name__ == "__main__":
             # Optional: Print a summary 
             print("\n--- Summary ---")
             for res in results:
-                                print(f"Segment {res['segment_index']}: '{res['text']}' "
-                      f"(Lex: {res['lexical_validity']:.2f}, "
-                      f"PPL: {res['perplexity']:,.0f}, "
-                      f"Conf: {res['avg_logprob']:.3f})")
+                print(f"Segment {res['segment_index']} ({res['start_time_s']:.2f}s-{res['end_time_s']:.2f}s): "
+                      f"-> GCS Level Prediction: {res['gcs_level_prediction']} "
+                      f"(Score: {res['combined_score']:.2f}) || Text: '{res['transcription']}'")
                                 
 
     pipeline_end_time = time.time()
