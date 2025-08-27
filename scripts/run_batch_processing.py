@@ -2,6 +2,7 @@ import os
 import sys
 import pandas as pd
 import time
+from glob import glob
 
 # Setup Project Path
 project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -71,86 +72,109 @@ def process_single_file_for_features(file_path, vad_model, vad_utils, whisper_mo
             
     return all_results
 
+def run_batch_for_set(set_name, data_root, models):
+    """
+    Runs the full batch processing for a given dataset split (e.g., 'validation_set').
+    """
+    print(f"\n{'='*20} STARTING BATCH PROCESSING FOR: {set_name.upper()} {'='*20}")
+    
+    # Unpack the models dictionary
+    vad_model, vad_utils = models['vad']
+    whisper_model = models['whisper']
+    german_dict = models['dictionary']
+    lm_tokenizer, lm_model = models['lm']
+
+    set_path = os.path.join(data_root, set_name)
+    data_categories = {
+        "gcs_2": os.path.join(set_path, "gcs_2"),
+        "gcs_3": os.path.join(set_path, "gcs_3"),
+        "gcs_45_clean": os.path.join(set_path, "gcs_45"),
+        "gcs_45_noisy": os.path.join(set_path, "gcs_45_noisy"),
+    }
+        
+    all_feature_results = []
+    
+    for category_name, category_path in data_categories.items():
+        print(f"\n--- Processing category: {category_name} ---")
+        print(f"Searching for audio files in: {category_path}")
+        
+        audio_files_to_process = glob(os.path.join(category_path, '*.*'))
+        
+        if not audio_files_to_process:
+            print(f"Warning: No audio files found in '{category_path}'. Skipping.")
+            continue
+            
+        print(f"Found {len(audio_files_to_process)} files to process.")
+        
+        for i, file_path in enumerate(audio_files_to_process):
+            print(f"  -> Processing file {i+1}/{len(audio_files_to_process)}: {os.path.basename(file_path)}")
+            
+            file_results = process_single_file_for_features(
+                file_path, vad_model, vad_utils, whisper_model,
+                german_dict, lm_tokenizer, lm_model
+            )
+            
+            for result in file_results:
+                result['category'] = category_name
+                if category_name == "gcs_45_noisy" and "snr" in os.path.basename(file_path):
+                    try:
+                        snr_str = os.path.basename(file_path).split('snr')[1].split('.')[0]
+                        result['snr'] = int(snr_str)
+                    except (IndexError, ValueError):
+                        result['snr'] = None
+                else:
+                    result['snr'] = None
+            
+            all_feature_results.extend(file_results)
+
+    return all_feature_results
+
 
 if __name__ == "__main__":
     # --- Configuration ---
     WHISPER_MODEL_SIZE = "base"
     LM_MODEL_ID = "dbmdz/german-gpt2"
     
+    project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     data_root = os.path.join(project_root, "data")
-    data_categories = {
-        "gcs_2": os.path.join(data_root, "gcs_level_2_incomprehensible"),
-        "gcs_3": os.path.join(data_root, "gcs_level_3_word_salad"),
-        "gcs_45_clean": os.path.join(data_root, "clean_german_speech"),
-        "gcs_45_noisy": os.path.join(data_root, "augmented_noisy_speech"), 
-    }
-    
-    output_csv_path = os.path.join(project_root, "results", "master_feature_dataset.csv")
-    os.makedirs(os.path.dirname(output_csv_path), exist_ok=True)
+    results_dir = os.path.join(project_root, "results")
+    os.makedirs(results_dir, exist_ok=True)
 
+    # --- Initialization (Done once for the whole script) ---
     print("--- Initializing all models for batch processing ---")
     start_init_time = time.time()
-    vad_model, vad_utils = initialize_vad_model()
-    whisper_model = initialize_whisper_model(model_size=WHISPER_MODEL_SIZE)
-    german_dict = initialize_dictionary()
-    lm_tokenizer, lm_model = initialize_language_model(model_id=LM_MODEL_ID)
+    models_dict = {
+        'vad': initialize_vad_model(),
+        'whisper': initialize_whisper_model(model_size=WHISPER_MODEL_SIZE),
+        'dictionary': initialize_dictionary(),
+        'lm': initialize_language_model(model_id=LM_MODEL_ID)
+    }
     end_init_time = time.time()
     print(f"--- Models initialized in {end_init_time - start_init_time:.2f} seconds ---\n")
 
-    if not all([vad_model, whisper_model, german_dict, lm_tokenizer, lm_model]):
+    if not all(m is not None for v in models_dict.values() for m in (v if isinstance(v, tuple) else [v])):
         print("A model failed to initialize. Aborting batch processing.")
     else:
         # --- Main Batch Processing Logic ---
-        all_feature_results = []
         total_start_time = time.time()
         
-        for category_name, category_path in data_categories.items():
-            print(f"--- Processing category: {category_name} ---")
-            print(f"Searching for audio files in: {category_path}")
+        # Process both validation and test sets
+        for data_set_name in ["validation_set", "test_set"]:
+            results_for_set = run_batch_for_set(data_set_name, data_root, models_dict)
             
-            audio_files_to_process = find_audio_files(category_path)
-            
-            if not audio_files_to_process:
-                print(f"Warning: No .wav files found in '{category_path}'. Skipping.")
-                continue
+            if results_for_set:
+                output_csv_path = os.path.join(results_dir, f"features_{data_set_name}.csv")
+                print(f"\nSaving {len(results_for_set)} total segments from {data_set_name} to CSV: {output_csv_path}")
                 
-            print(f"Found {len(audio_files_to_process)} files to process.")
-            
-            for i, file_path in enumerate(audio_files_to_process):
-                print(f"  -> Processing file {i+1}/{len(audio_files_to_process)}: {os.path.basename(file_path)}")
-                
-                file_results = process_single_file_for_features(
-                    file_path, vad_model, vad_utils, whisper_model,
-                    german_dict, lm_tokenizer, lm_model
-                )
-                
-                for result in file_results:
-                    result['category'] = category_name
-                    if category_name == "gcs_45_noisy" and "snr" in os.path.basename(file_path):
-                        try:
-                            snr_str = os.path.basename(file_path).split('snr')[1].split('.')[0]
-                            result['snr'] = int(snr_str)
-                        except (IndexError, ValueError):
-                            result['snr'] = None
-                    else:
-                        result['snr'] = None
-
-                all_feature_results.extend(file_results)
+                df = pd.DataFrame(results_for_set)
+                column_order = ['filepath', 'category', 'snr', 'start_time', 'end_time', 
+                                'transcription', 'avg_logprob', 'lexical_validity', 'perplexity']
+                # Ensure all columns exist before reordering
+                df = df.reindex(columns=column_order)
+                df.to_csv(output_csv_path, index=False, encoding='utf-8')
+                print(f"Successfully saved {data_set_name} feature dataset.")
+            else:
+                print(f"No results were generated for {data_set_name}. CSV file not saved.")
 
         total_end_time = time.time()
-        print(f"\n--- Batch processing complete in {total_end_time - total_start_time:.2f} seconds ---")
-
-        # --- Save to CSV ---
-        if all_feature_results:
-            print(f"Saving {len(all_feature_results)} total segments to CSV: {output_csv_path}")
-            df = pd.DataFrame(all_feature_results)
-            
-            # Reorder columns for clarity
-            column_order = ['filepath', 'category', 'snr', 'start_time', 'end_time', 
-                            'transcription', 'avg_logprob', 'lexical_validity', 'perplexity']
-            df = df[column_order]
-            
-            df.to_csv(output_csv_path, index=False, encoding='utf-8')
-            print("Successfully saved master feature dataset.")
-        else:
-            print("No results were generated. CSV file not saved.")
+        print(f"\n--- Total batch processing complete in {(total_end_time - total_start_time)/60:.2f} minutes ---")
