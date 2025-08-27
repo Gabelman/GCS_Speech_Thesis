@@ -3,6 +3,7 @@ import soundfile as sf
 import numpy as np
 import random
 import librosa 
+from glob import glob
 
 def calculate_rms(audio):
     """Calculates the Root Mean Square of an audio signal."""
@@ -48,72 +49,84 @@ def add_noise(clean_audio, noise_audio, snr_db):
     noisy_audio = clean_audio + (noise_segment * scaling_factor)
     return noisy_audio
 
+
+def process_set(set_name, base_dir, noise_files, target_snrs_db):
+    """
+    Processes a whole set (e.g., 'validation_set' or 'test_set').
+    """
+    print(f"\n--- Processing {set_name} ---")
+    
+    clean_speech_dir = os.path.join(base_dir, set_name, "gcs_45")
+    output_dir = os.path.join(base_dir, set_name, "gcs_45_noisy")
+    os.makedirs(output_dir, exist_ok=True)
+
+    try:
+        clean_files = glob(os.path.join(clean_speech_dir, '*.*')) # Using glob to find any audio file (maybe find a more elegant solution)
+    except FileNotFoundError:
+        print(f"Error: Directory not found: {clean_speech_dir}. Skipping this set.")
+        return
+
+    if not clean_files:
+        print(f"No clean speech files found in {clean_speech_dir}. Skipping.")
+        return
+        
+    print(f"Found {len(clean_files)} clean files in {set_name}. Starting augmentation...")
+    
+    for i, clean_filepath in enumerate(clean_files):
+        clean_filename = os.path.basename(clean_filepath)
+        print(f"  -> Augmenting file {i+1}/{len(clean_files)}: '{clean_filename}'")
+        
+        try:
+            clean_audio, sr = librosa.load(clean_filepath, sr=16000, mono=True)
+        except Exception as e:
+            print(f"    Could not load {clean_filename}, skipping. Error: {e}")
+            continue
+
+        noise_filepath = random.choice(noise_files)
+        noise_filename = os.path.basename(noise_filepath)
+        
+        try:
+            noise_audio, _ = librosa.load(noise_filepath, sr=16000, mono=True)
+        except Exception as e:
+            print(f"    Could not load {noise_filename}, skipping. Error: {e}")
+            continue
+
+        for snr in target_snrs_db:
+            noisy_audio = add_noise(clean_audio, noise_audio, snr)
+            
+            base_name = os.path.splitext(clean_filename)[0]
+            noise_base_name = os.path.splitext(noise_filename)[0]
+            output_filename = f"{base_name}_noise_{noise_base_name}_snr{snr}.wav"
+            output_filepath = os.path.join(output_dir, output_filename)
+            
+            sf.write(output_filepath, noisy_audio, sr)
+
+    print(f"--- Finished processing {set_name} ---")
+
+
 if __name__ == "__main__":
     print("--- Starting Noise Augmentation Script ---")
 
     # --- Configuration ---
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     
-    clean_speech_dir = os.path.join(project_root, "data", "clean_german_speech")
-    noise_dir = os.path.join(project_root, "data", "noise_samples")
-    output_dir = os.path.join(project_root, "data", "augmented_noisy_speech")
+    data_root = os.path.join(project_root, "data")
+    noise_dir = os.path.join(data_root, "noise_samples")
     
     # Desired SNR levels to generate
     target_snrs_db = [15, 10, 5, 0, -5]
-    
-    os.makedirs(clean_speech_dir, exist_ok=True)
-    os.makedirs(noise_dir, exist_ok=True)
-    os.makedirs(output_dir, exist_ok=True)
 
     # --- Main Logic ---
-    # 1. Get list of clean speech and noise files
     try:
-        clean_files = [f for f in os.listdir(clean_speech_dir) if f.endswith('.mp3') or f.endswith('.wav')]
-        noise_files = [f for f in os.listdir(noise_dir) if f.endswith('.wav')or f.endswith('.mp3')]
-    except FileNotFoundError as e:
-        print(f"Error: Directory not found - {e}. Please create the necessary data folders.")
-        clean_files, noise_files = [], []
-
-
-    if not clean_files or not noise_files:
-        print("Error: Clean speech or noise sample directories are empty.")
-        print(f"Please add clean audio files to: {clean_speech_dir}")
-        print(f"Please add noise audio files to: {noise_dir}")
-    else:
-        print(f"Found {len(clean_files)} clean speech files and {len(noise_files)} noise files.")
-        
-        # 2. Loop through each clean file and add noise
-        for clean_filename in clean_files:
-            clean_filepath = os.path.join(clean_speech_dir, clean_filename)
-            
-            try:
-                # Load the clean audio, ensure it's mono and at a consistent sample rate
-                clean_audio, sr = librosa.load(clean_filepath, sr=16000, mono=True)
-            except Exception as e:
-                print(f"Could not load {clean_filename}, skipping. Error: {e}")
-                continue
-
-            # Pick a random noise file to mix with
-            noise_filename = random.choice(noise_files)
-            noise_filepath = os.path.join(noise_dir, noise_filename)
-            
-            try:
-                # Load the noise audio
-                noise_audio, _ = librosa.load(noise_filepath, sr=16000, mono=True)
-            except Exception as e:
-                print(f"Could not load {noise_filename}, skipping. Error: {e}")
-                continue
-
-            # 3. Generate a noisy version for each target SNR
-            for snr in target_snrs_db:
-                print(f"  -> Augmenting '{clean_filename}' with '{noise_filename}' at {snr}dB SNR...")
-                
-                noisy_audio = add_noise(clean_audio, noise_audio, snr)
-                base_name = os.path.splitext(clean_filename)[0]
-                output_filename = f"{base_name}_noise_{os.path.splitext(noise_filename)[0]}_snr{snr}.wav"
-                output_filepath = os.path.join(output_dir, output_filename)
-                
-                sf.write(output_filepath, noisy_audio, sr)
-
-        print("\n--- Noise augmentation complete! ---")
-        print(f"Noisy files saved in: {output_dir}")
+            all_noise_files = glob(os.path.join(noise_dir, '*.wav'))
+            if not all_noise_files:
+                print(f"Error: No noise sample WAV files found in: {noise_dir}")
+                print("Please add noise files to continue.")
+            else:
+                print(f"Found {len(all_noise_files)} noise files.")
+                # Process both the validation set and the test set
+                process_set("validation_set", data_root, all_noise_files, target_snrs_db)
+                process_set("test_set", data_root, all_noise_files, target_snrs_db)
+                print("\n--- All noise augmentation complete! ---")
+    except FileNotFoundError:
+            print(f"Error: Noise directory not found at {noise_dir}")
