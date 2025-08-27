@@ -56,4 +56,4 @@ def generate_word_salad_audio(output_dir, num_files=200, lang='de'):
 if __name__ == "__main__":
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     target_dir = os.path.join(project_root, "data", "gcs_level_3_word_salad")
-    generate_word_salad_audio(output_dir=target_dir, num_files=20)
+    generate_word_salad_audio(output_dir=target_dir, num_files=200)

@@ -103,7 +103,7 @@ def classify_gcs_level(combined_score, no_speech_prob):
 if __name__ == "__main__":
     print("--- Testing classifier.py ---")
 
-    # Define some feature sets simulating different GCS levels
+    # Define some feature sets simulating different GCS levels 
     gcs_5_features = {'avg_logprob': -0.2, 'lexical_validity': 1.0, 'perplexity': 50.0, 'no_speech_prob': 0.01}
     gcs_3_features = {'avg_logprob': -0.8, 'lexical_validity': 1.0, 'perplexity': 10000.0, 'no_speech_prob': 0.1}
     gcs_2_features = {'avg_logprob': -2.5, 'lexical_validity': 0.1, 'perplexity': 20000.0, 'no_speech_prob': 0.4}
