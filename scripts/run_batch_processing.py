@@ -9,7 +9,7 @@ project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.append(project_root)
 
 # Import Pipeline Components
-from src.audio_utils import load_audio, initialize_vad_model, get_speech_timestamps
+from src.audio_utils import load_audio, initialize_vad_model,  get_all_sound_events, get_speech_prob
 from src.transcription import initialize_whisper_model, transcribe_chunk
 from src.feature_extractor import (initialize_dictionary, calculate_lexical_validity,
                                    initialize_language_model, calculate_perplexity)
@@ -23,49 +23,81 @@ def find_audio_files(directory):
                 audio_files.append(os.path.join(root, file))
     return audio_files
 
-def process_single_file_for_features(file_path, vad_model, vad_utils, whisper_model, 
-                                     german_dictionary, lm_tokenizer, lm_model):
+def process_single_file_for_features(file_path, models):
     """
-    Processes a single audio file and extracts features for each speech segment.
-    Modified version of the logic in main_pipeline.py.
+    Processes a single audio file with the robust two-stage filtering logic.
     """
+    # Unpack the models dictionary for easier access
+    vad_model, _ = models['vad'] # We only need the model for get_speech_prob
+    whisper_model = models['whisper']
+    german_dict = models['dictionary']
+    lm_tokenizer, lm_model = models['lm']
+
     all_results = []
     
-    waveform, sampling_rate = load_audio(file_path)
-    if waveform is None:
-        return [] 
-
-    speech_timestamps = get_speech_timestamps(waveform, vad_model, vad_utils, sampling_rate)
-    if not speech_timestamps:
+    # 1. Load audio with its original sampling rate
+    waveform_orig, sampling_rate_orig = load_audio(file_path)
+    if waveform_orig is None:
         return []
 
-    for i, segment in enumerate(speech_timestamps):
+    # 2. Sensitive First Pass: Get ALL potential sound events using energy-based VAD.
+    #    This also handles resampling the waveform to 16kHz for all subsequent steps.
+    sound_events, waveform_16k, sr_16k = get_all_sound_events(waveform_orig, sampling_rate_orig)
+    
+    if not sound_events:
+        return [] # File is likely pure silence, skip it.
+
+    # 3. Process and FILTER each potential sound event
+    for i, segment in enumerate(sound_events):
         start_sec = segment['start']
         end_sec = segment['end']
         
-        start_sample = int(start_sec * sampling_rate)
-        end_sample = int(end_sec * sampling_rate)
-        audio_chunk = waveform[start_sample:end_sample]
+        start_sample = int(start_sec * sr_16k)
+        end_sample = int(end_sec * sr_16k)
+        audio_chunk = waveform_16k[start_sample:end_sample]
 
-        if len(audio_chunk) == 0:
+        if len(audio_chunk) < 100: # Skip extremely short, probably junk segments
             continue
 
+        # --- SMART FILTERING STAGE ---
+        # A. Get Silero VAD's opinion on the chunk
+        silero_speech_prob = get_speech_prob(audio_chunk, vad_model)
+        
+        # B. Get Whisper's opinion by transcribing
         transcription_result = transcribe_chunk(audio_chunk, whisper_model, language="de")
+        
+        # C. Extract Whisper's no-speech probability
+        whisper_no_speech_prob = transcription_result.get('no_speech_prob', 1.0) if transcription_result else 1.0
 
+        # --- DECISION LOGIC ---
+        # Accept the segment if Silero has some confidence OR Whisper is confident it IS speech.
+        # These thresholds (0.25 and 0.60) are tunable parameters!
+        is_human_vocalization = (silero_speech_prob > 0.25) or (whisper_no_speech_prob < 0.60)
+
+        if not is_human_vocalization:
+            # This segment is likely background noise (GCS 1 with noise)
+            print(f"      -> Skipping segment ({start_sec:.2f}s-{end_sec:.2f}s). "
+                  f"Filtered as noise (Silero P={silero_speech_prob:.2f}, Whisper NoSpeechP={whisper_no_speech_prob:.2f}).")
+            continue # Skip to the next sound event
+
+        # --- FEATURE EXTRACTION (only runs if the segment passed the filter) ---
         if transcription_result and transcription_result['text']:
             transcript_text = transcription_result['text']
             
             features = {
                 'avg_logprob': transcription_result['avg_logprob'],
-                'lexical_validity': calculate_lexical_validity(transcript_text, german_dictionary),
+                'lexical_validity': calculate_lexical_validity(transcript_text, german_dict),
                 'perplexity': calculate_perplexity(transcript_text, lm_tokenizer, lm_model)
             }
             
+            # This is the final dictionary for our CSV row
             final_result = {
                 'filepath': file_path,
                 'start_time': start_sec,
                 'end_time': end_sec,
                 'transcription': transcript_text,
+                'silero_speech_prob': silero_speech_prob, # Saving this for analysis is very useful!
+                'whisper_no_speech_prob': whisper_no_speech_prob, # Also very useful
                 **features
             }
             all_results.append(final_result)
@@ -77,15 +109,10 @@ def run_batch_for_set(set_name, data_root, models):
     Runs the full batch processing for a given dataset split (e.g., 'validation_set').
     """
     print(f"\n{'='*20} STARTING BATCH PROCESSING FOR: {set_name.upper()} {'='*20}")
-    
-    # Unpack the models dictionary
-    vad_model, vad_utils = models['vad']
-    whisper_model = models['whisper']
-    german_dict = models['dictionary']
-    lm_tokenizer, lm_model = models['lm']
 
     set_path = os.path.join(data_root, set_name)
     data_categories = {
+        "gcs_1": os.path.join(set_path, "gcs_1"),
         "gcs_2": os.path.join(set_path, "gcs_2"),
         "gcs_3": os.path.join(set_path, "gcs_3"),
         "gcs_45_clean": os.path.join(set_path, "gcs_45"),
@@ -98,8 +125,11 @@ def run_batch_for_set(set_name, data_root, models):
         print(f"\n--- Processing category: {category_name} ---")
         print(f"Searching for audio files in: {category_path}")
         
-        audio_files_to_process = glob(os.path.join(category_path, '*.*'))
-        
+        audio_files_to_process = []
+        supported_extensions = ['*.wav', '*.mp3']
+        for ext in supported_extensions:
+            audio_files_to_process.extend(glob(os.path.join(category_path, ext)))
+
         if not audio_files_to_process:
             print(f"Warning: No audio files found in '{category_path}'. Skipping.")
             continue
@@ -108,12 +138,9 @@ def run_batch_for_set(set_name, data_root, models):
         
         for i, file_path in enumerate(audio_files_to_process):
             print(f"  -> Processing file {i+1}/{len(audio_files_to_process)}: {os.path.basename(file_path)}")
-            
-            file_results = process_single_file_for_features(
-                file_path, vad_model, vad_utils, whisper_model,
-                german_dict, lm_tokenizer, lm_model
-            )
-            
+
+            file_results = process_single_file_for_features(file_path, models)
+
             for result in file_results:
                 result['category'] = category_name
                 if category_name == "gcs_45_noisy" and "snr" in os.path.basename(file_path):
@@ -168,8 +195,8 @@ if __name__ == "__main__":
                 
                 df = pd.DataFrame(results_for_set)
                 column_order = ['filepath', 'category', 'snr', 'start_time', 'end_time', 
-                                'transcription', 'avg_logprob', 'lexical_validity', 'perplexity']
-                # Ensure all columns exist before reordering
+                                'transcription', 'avg_logprob', 'lexical_validity', 'perplexity', 'silero_speech_prob', 'whisper_no_speech_prob']
+
                 df = df.reindex(columns=column_order)
                 df.to_csv(output_csv_path, index=False, encoding='utf-8')
                 print(f"Successfully saved {data_set_name} feature dataset.")

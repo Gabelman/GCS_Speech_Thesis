@@ -1,6 +1,7 @@
 import soundfile as sf
 import numpy as np 
 import torch
+import librosa
 
 def load_audio(file_path):
     """
@@ -49,71 +50,72 @@ def initialize_vad_model():
         print(f"Error initializing VAD model: {e}")
         return None, None
 
-def get_speech_timestamps(audio_waveform, vad_model, utils, sampling_rate):
+def get_all_sound_events(audio_waveform, sampling_rate, top_db=25, min_duration_s=0.2):
     """
-    Uses Silero VAD to find speech timestamps in an audio waveform.
-
-    NOTE: Silero VAD expects audio to be a 16kHz mono torch.Tensor.
-          This function currently assumes the input audio is already mono
-          and will handle resampling to 16kHz if necessary.
-
-    Args:
-        audio_waveform (numpy.ndarray): The audio data.
-        vad_model: The initialized Silero VAD model.
-        utils (dict): The Silero VAD utility functions.
-        sampling_rate (int): The sampling rate of the audio waveform.
-
-    Returns:
-        list: A list of dictionaries with 'start' and 'end' times in seconds.
+    Finds all non-silent audio events in a file using a simple energy-based VAD.
+    This is our primary, sensitive segmenter.
     """
-    if vad_model is None or utils is None:
-        print("VAD model not initialized.")
-        return []
-
-    # Silero VAD works with torch.Tensors
-    audio_tensor = torch.from_numpy(audio_waveform).float()
-
-    # VAD expects 16kHz audio. Resampling if the input is different. (librosa)
+    # Resample to 16k if needed, as most subsequent steps expect it
     if sampling_rate != 16000:
-        try:
-            import librosa
-            resampler = librosa.resample
-            audio_tensor_16k = resampler(y=audio_waveform, orig_sr=sampling_rate, target_sr=16000)
-            audio_tensor = torch.from_numpy(audio_tensor_16k).float()
-            print(f"Resampled audio from {sampling_rate} Hz to 16000 Hz for VAD.")
-        except ImportError:
-            print("Error: librosa is not installed. Cannot resample audio to 16kHz for VAD.")
-            print("Please install it using: pip install librosa")
-            return []
-            
-    # Get the specific utility function for getting timestamps
-    (get_speech_timestamps_func,
-     save_audio,
-     read_audio,
-     VADIterator,
-     collect_chunks) = utils
+        audio_waveform = librosa.resample(y=audio_waveform, orig_sr=sampling_rate, target_sr=16000)
+        sampling_rate = 16000
 
-    try:
-        speech_timestamps = get_speech_timestamps_func(audio_tensor, vad_model, sampling_rate=16000)
+    clips = librosa.effects.split(y=audio_waveform, top_db=top_db)
+    
+    timestamps = []
+    for start_sample, end_sample in clips:
+        start_sec = start_sample / sampling_rate
+        end_sec = end_sample / sampling_rate
+        if (end_sec - start_sec) >= min_duration_s:
+            timestamps.append({'start': start_sec, 'end': end_sec})
+            
+    return timestamps, audio_waveform, sampling_rate
+
+def get_speech_prob(audio_chunk_16k, vad_model):
+    """
+    Calculates the average speech probability for a given audio chunk.
+    It breaks the chunk into smaller, model-compatible pieces and averages the results.
+    """
+    if vad_model is None:
+        return 0.0
+    
+    # The model strictly requires 512 sample chunks for 16kHz audio.
+    chunk_size = 512
+    
+    # If the chunk is smaller than the required size, pad it with silence
+    if len(audio_chunk_16k) < chunk_size:
+        padding = torch.zeros(chunk_size - len(audio_chunk_16k), dtype=torch.float32)
+        audio_chunk_16k = torch.cat([torch.from_numpy(audio_chunk_16k).float(), padding])
+    else:
+        audio_chunk_16k = torch.from_numpy(audio_chunk_16k).float()
+
+    # List to store probabilities of each small chunk
+    speech_probs = []
+    
+    # Iterate through the audio chunk in windows of the required size
+    for i in range(0, len(audio_chunk_16k), chunk_size):
+        chunk = audio_chunk_16k[i : i + chunk_size]
         
-        speech_timestamps_seconds = []
-        for ts in speech_timestamps:
-            speech_timestamps_seconds.append({
-                'start': ts['start'] / 16000.0,
-                'end': ts['end'] / 16000.0
-            })
-        
-        print(f"VAD found {len(speech_timestamps_seconds)} speech segment(s).")
-        return speech_timestamps_seconds
-    except Exception as e:
-        print(f"Error during VAD processing: {e}")
-        return []
+        # If the last chunk is smaller, pad it
+        if len(chunk) < chunk_size:
+            padding = torch.zeros(chunk_size - len(chunk))
+            chunk = torch.cat([chunk, padding])
+
+        # Get the speech probability for the small chunk
+        speech_prob = vad_model(chunk.unsqueeze(0), 16000).item()
+        speech_probs.append(speech_prob)
+    
+    # Return the average probability over all the small chunks
+    if not speech_probs:
+        return 0.0
+    
+    return sum(speech_probs) / len(speech_probs)
 
 if __name__ == "__main__":
     
     import os
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__))) 
-    sample_audio_path = os.path.join(project_root, "data/CommonVoice21.0/cv-corpus-21.0-2025-03-14/de/clips", "TestSample.mp3") 
+    sample_audio_path = os.path.join(project_root, "data/validation_set/gcs_2", "1-36400-A-23.wav") 
     
     print(f"--- Testing audio_utils.py ---")
     print(f"Attempting to load: {sample_audio_path}")
@@ -128,19 +130,41 @@ if __name__ == "__main__":
         waveform_data, sr = load_audio(sample_audio_path)
 
         if waveform_data is not None:
-            print("\n--- Testing VAD ---")
-            # 2. Initialize the VAD model
-            vad_model_instance, vad_utils = initialize_vad_model()
+            print("\n--- Testing Energy-Based Event Detection ---")
+            # 2. Get all sound events using the new energy-based function
+            sound_events, waveform_16k, sr_16k = get_all_sound_events(waveform_data, sr)
 
-            if vad_model_instance:
-                # 3. Get speech timestamps
-                timestamps = get_speech_timestamps(waveform_data, vad_model_instance, vad_utils, sr)
+            if sound_events:
+                print(f"Found {len(sound_events)} potential sound events:")
+                for i, ts in enumerate(sound_events):
+                    print(f"  Event {i+1}: Start={ts['start']:.2f}s, End={ts['end']:.2f}s")
+            else:
+                print("No sound events detected.")
 
-                if timestamps:
-                    print("\nDetected Speech Segments (in seconds):")
-                    for i, ts in enumerate(timestamps):
-                        print(f"  Segment {i+1}: Start={ts['start']:.2f}s, End={ts['end']:.2f}s")
+            print("\n--- Testing Silero VAD Speech Probability ---")
+            # 3. Initialize the VAD model to test the probability function
+            vad_model_instance, _ = initialize_vad_model() # We don't need utils here
+
+            if vad_model_instance and sound_events:
+                # Let's test the speech probability of the first detected event
+                first_event = sound_events[0]
+                start_sample = int(first_event['start'] * sr_16k)
+                end_sample = int(first_event['end'] * sr_16k)
+                audio_chunk = waveform_16k[start_sample:end_sample]
+
+                if len(audio_chunk) > 0:
+                    speech_prob = get_speech_prob(audio_chunk, vad_model_instance)
+                    print(f"Speech probability for the first event: {speech_prob:.4f}")
+                    if speech_prob > 0.5:
+                        print("  -> This event is likely speech.")
+                    else:
+                        print("  -> This event is likely not speech.")
                 else:
-                    print("No speech segments were detected.")
+                    print("First event audio chunk is empty, cannot test speech probability.")
+            elif not sound_events:
+                 print("Cannot test speech probability as no events were detected.")
+            else:
+                print("Failed to initialize VAD model.")
+
         else:
-            print("Failed to load audio, cannot perform VAD test.")
+            print("Failed to load audio, cannot perform tests.")
