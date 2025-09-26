@@ -7,7 +7,7 @@ from audio_utils import load_audio
 from transcription import initialize_whisper_model, transcribe_chunk
 from feature_extractor import (initialize_dictionary, calculate_lexical_validity,
                                initialize_language_model, calculate_perplexity)
-from classifier import calculate_combined_comprehensibility_score, classify_gcs_level
+from classifier import normalize_feature, classify_gcs_level_rule_based
 
 # Import written by Copilot
 # Import in a way that doesn't require a separate initialization function
@@ -18,10 +18,24 @@ except Exception as e:
     print(f"Could not load VADIterator. Ensure Silero VAD is installed. Error: {e}")
     VADIterator = None
 
-def simulate_realtime_processing(file_path, vad_model, whisper_model, german_dict, lm_tokenizer, lm_model, feature_weights):
+def simulate_realtime_processing(file_path, vad_model, whisper_model, german_dict, lm_tokenizer, lm_model):
     """
     Simulates real-time processing of an audio file to measure latency and RTF.
     """
+    # Normalization constants from best model
+    CONFIDENCE_MIN = -2.0
+    CONFIDENCE_MAX = -0.1
+    PERPLEXITY_MIN = 10.0
+    PERPLEXITY_MAX = 10000.0
+
+    # Final tuned Thresholds for GCS classification from best model
+    threshold_params = {
+        'conf_short': 0.6,
+        'lex_gcs2': 0.5,
+        'conf_gcs2': 0.45,
+        'ppl_gcs45': 0.75,
+        'conf_gcs45': 0.55
+    }
     if VADIterator is None:
         print("VADIterator not available. Cannot run simulation.")
         return
@@ -85,13 +99,21 @@ def simulate_realtime_processing(file_path, vad_model, whisper_model, german_dic
                 
                 transcription_result = transcribe_chunk(speech_chunk_waveform, whisper_model)
                 if transcription_result and transcription_result['text']:
-                    features = {
-                        'avg_logprob': transcription_result['avg_logprob'],
-                        'lexical_validity': calculate_lexical_validity(transcription_result['text'], german_dict),
-                        'perplexity': calculate_perplexity(transcription_result['text'], lm_tokenizer, lm_model)
+                    # A. Normalize features
+                    norm_conf = normalize_feature(transcription_result['avg_logprob'], CONFIDENCE_MIN, CONFIDENCE_MAX)
+                    norm_lex = np.clip(calculate_lexical_validity(transcription_result['text'], german_dict), 0.0, 1.0)
+                    norm_inv_ppl = normalize_feature(calculate_perplexity(transcription_result['text'], lm_tokenizer, lm_model), PERPLEXITY_MIN, PERPLEXITY_MAX, invert=True)
+                    
+                    normalized_features = {
+                        'norm_confidence': norm_conf,
+                        'norm_lexical': norm_lex,
+                        'norm_inv_perplexity': norm_inv_ppl
                     }
-                    combined_score, _ = calculate_combined_comprehensibility_score(features, feature_weights)
-                    gcs_level = classify_gcs_level(combined_score, transcription_result['no_speech_prob'])
+                    raw_features = {'transcription': transcription_result['text']}
+                    no_speech_prob = transcription_result.get('no_speech_prob', 0)
+                    
+                    # B. Classify using the final rule-based function
+                    gcs_level = classify_gcs_level_rule_based(normalized_features, no_speech_prob, raw_features, threshold_params)
                 else:
                     gcs_level = 1 # No speech detected by Whisper or empty transcript
                 
@@ -140,6 +162,6 @@ if __name__ == "__main__":
     
     if all([vad_model, whisper_model, german_dict, lm_tokenizer, lm_model]):
         simulate_realtime_processing(input_audio_path, vad_model, whisper_model, german_dict,
-                                     lm_tokenizer, lm_model, FEATURE_WEIGHTS)
+                                     lm_tokenizer, lm_model)
     else:
         print("Model initialization failed. Exiting simulation.")

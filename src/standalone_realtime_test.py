@@ -210,7 +210,7 @@ if __name__ == "__main__":
     
     project_root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     # Path to a sample audio file for testing
-    input_audio_path = os.path.join(project_root, "data", "sample.wav") 
+    input_audio_path = os.path.join(project_root, "data", "sample4.wav") 
     
     print("--- Initializing shared models (VAD, Dictionary, LM) ---")
     shared_models = {
