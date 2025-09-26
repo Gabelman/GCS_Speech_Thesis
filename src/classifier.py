@@ -67,71 +67,108 @@ def calculate_combined_comprehensibility_score(features, weights):
     
     return combined_score, {'norm_confidence': norm_confidence, 'norm_lexical': norm_lexical, 'norm_inv_perplexity': norm_inv_perplexity}
 
-def classify_gcs_level(combined_score, no_speech_prob):
+def classify_gcs_level_rule_based(normalized_features, no_speech_prob):
     """
-    Maps a combined comprehensibility score to a GCS-inspired level.
-    These thresholds are initial HEURISTICS and MUST be tuned later.
-
-    Args:
-        combined_score (float): The combined score from 0.0 to 1.0.
-        no_speech_prob (float): The 'no_speech_prob' from Whisper.
-
-    Returns:
-        int: The GCS-inspired classification level (1-5).
+    Classifies GCS level using a rule-based approach on normalized features.
     """
-    # First, check for a strong "no speech" signal from Whisper or VAD
-    # (VAD already segments, but this is a double-check)
-    if no_speech_prob > 0.8: # Very high probability of no speech
+    if no_speech_prob > 0.8:
         return 1
+    
+    # Ensure transcription is a string before splitting
+    transcription_text = str(raw_features.get('transcription', ''))
+    num_words = len(transcription_text.split())
 
-    # Define score thresholds for classification
-    # Initial guesses
-    THRESHOLD_GCS3 = 0.35 # Score below this might be GCS 2 or 3
-    THRESHOLD_GCS4_5 = 0.65 # Score above this is likely coherent speech
+    # --- Rule 1: Handle very short utterances ---
+    if num_words <= 2:
+        if normalized_features['norm_confidence'] > thresholds.get['conf_short']:
+            return 5
+        else:
+            return 2
 
-    if combined_score >= THRESHOLD_GCS4_5:
-        # High score -> High confidence, lexically valid, coherent
-        return 5 
-    elif combined_score >= THRESHOLD_GCS3:
-        # Medium score -> Might be word salad or a flawed sentence
-        return 3
-    else:
-        # Low score -> Likely incomprehensible sounds
+    # --- Rule 2: Handle longer utterances ---
+    if normalized_features['norm_lexical'] < thresholds.get['lex_gcs2'] or \
+       normalized_features['norm_confidence'] < thresholds.get['conf_gcs2']:
         return 2
+
+    if normalized_features['norm_inv_perplexity'] > thresholds.get['ppl_gcs45'] and \
+       normalized_features['norm_confidence'] > thresholds.get['conf_gcs45']:
+        return 5
+        
+    return 3
+
+''' # --- Rule 1: The GCS 2 "Lexical" Gate ---
+    # If the lexical validity is extremely low, it's almost certainly GCS 2.
+    # We also check confidence to make sure it's not a confident whisper of a non-word.
+    LEXICAL_THRESHOLD_FOR_GCS2 = 0.3
+    CONFIDENCE_THRESHOLD_FOR_GCS2 = 0.4
+    if normalized_features['norm_lexical'] < LEXICAL_THRESHOLD_FOR_GCS2 and \
+       normalized_features['norm_confidence'] < CONFIDENCE_THRESHOLD_FOR_GCS2:
+        return 2
+        
+    # --- Rule 2: The GCS 4/5 "Perplexity" Gate ---
+    # If the perplexity is very low (meaning coherence is high), it's GCS 4/5.
+    PERPLEXITY_THRESHOLD_FOR_GCS45 = 0.8
+    if normalized_features['norm_inv_perplexity'] > PERPLEXITY_THRESHOLD_FOR_GCS45:
+        return 5
+        
+    # --- Rule 3: The GCS 3 "Default" ---
+    # If it passed the GCS 2 gate (it's made of words) but failed the
+    # GCS 4/5 gate (it's not coherent), then it's GCS 3.
+    return 3'''
 
 # --- Test Block ---
 if __name__ == "__main__":
     print("--- Testing classifier.py ---")
 
-    # Define some feature sets simulating different GCS levels 
+    # --- Step 1: Define Normalization Ranges and Rule Thresholds ---
+    CONFIDENCE_MIN = -2.0
+    CONFIDENCE_MAX = -0.1
+    PERPLEXITY_MIN = 10.0
+    PERPLEXITY_MAX = 5000.0
+
+    def test_classifier_rule_based(normalized_features, no_speech_prob):
+        # These thresholds are for testing the logic. You tune them in the notebook.
+        LEXICAL_THRESHOLD_FOR_GCS2 = 0.3
+        CONFIDENCE_THRESHOLD_FOR_GCS2 = 0.4
+        PERPLEXITY_THRESHOLD_FOR_GCS45 = 0.8
+
+        if no_speech_prob > 0.8: return 1
+        if normalized_features['norm_lexical'] < LEXICAL_THRESHOLD_FOR_GCS2 and \
+           normalized_features['norm_confidence'] < CONFIDENCE_THRESHOLD_FOR_GCS2:
+            return 2
+        if normalized_features['norm_inv_perplexity'] > PERPLEXITY_THRESHOLD_FOR_GCS45:
+            return 5
+        return 3
+
+    # --- Step 2: Define simulated raw feature sets ---
     gcs_5_features = {'avg_logprob': -0.2, 'lexical_validity': 1.0, 'perplexity': 50.0, 'no_speech_prob': 0.01}
     gcs_3_features = {'avg_logprob': -0.8, 'lexical_validity': 1.0, 'perplexity': 10000.0, 'no_speech_prob': 0.1}
     gcs_2_features = {'avg_logprob': -2.5, 'lexical_validity': 0.1, 'perplexity': 20000.0, 'no_speech_prob': 0.4}
     
-    # Define weights (summing to 1.0)
-    # Perplexity has a bit more weight as it's a strong signal for GCS 3
-    feature_weights = {'confidence': 0.3, 'lexical': 0.3, 'perplexity': 0.4}
+    test_cases = {
+        "Simulated GCS 5 (Coherent)": gcs_5_features,
+        "Simulated GCS 3 (Word Salad)": gcs_3_features,
+        "Simulated GCS 2 (Incomprehensible)": gcs_2_features
+    }
 
-    # Test GCS 5
-    score_5, norms_5 = calculate_combined_comprehensibility_score(gcs_5_features, feature_weights)
-    level_5 = classify_gcs_level(score_5, gcs_5_features['no_speech_prob'])
-    print(f"\nSimulated GCS 5 (Coherent):")
-    print(f"  Features: {gcs_5_features}")
-    print(f"  Normalized Features: { {k: f'{v:.2f}' for k, v in norms_5.items()} }")
-    print(f"  Combined Score: {score_5:.3f} -> Classified as GCS Level: {level_5}")
+    # --- Step 3: Loop through test cases, normalize, and classify ---
+    for name, features in test_cases.items():
+        # A. Normalize the raw features
+        norm_conf = normalize_feature(features['avg_logprob'], CONFIDENCE_MIN, CONFIDENCE_MAX)
+        norm_lex = np.clip(features['lexical_validity'], 0.0, 1.0)
+        norm_inv_ppl = normalize_feature(features['perplexity'], PERPLEXITY_MIN, PERPLEXITY_MAX, invert=True)
+        
+        normalized_features_dict = {
+            'norm_confidence': norm_conf,
+            'norm_lexical': norm_lex,
+            'norm_inv_perplexity': norm_inv_ppl
+        }
 
-    # Test GCS 3
-    score_3, norms_3 = calculate_combined_comprehensibility_score(gcs_3_features, feature_weights)
-    level_3 = classify_gcs_level(score_3, gcs_3_features['no_speech_prob'])
-    print(f"\nSimulated GCS 3 (Word Salad):")
-    print(f"  Features: {gcs_3_features}")
-    print(f"  Normalized Features: { {k: f'{v:.2f}' for k, v in norms_3.items()} }")
-    print(f"  Combined Score: {score_3:.3f} -> Classified as GCS Level: {level_3}")
-
-    # Test GCS 2
-    score_2, norms_2 = calculate_combined_comprehensibility_score(gcs_2_features, feature_weights)
-    level_2 = classify_gcs_level(score_2, gcs_2_features['no_speech_prob'])
-    print(f"\nSimulated GCS 2 (Incomprehensible):")
-    print(f"  Features: {gcs_2_features}")
-    print(f"  Normalized Features: { {k: f'{v:.2f}' for k, v in norms_2.items()} }")
-    print(f"  Combined Score: {score_2:.3f} -> Classified as GCS Level: {level_2}")
+        # B. Classify using the rule-based function
+        level = test_classifier_rule_based(normalized_features_dict, features['no_speech_prob'])
+        
+        # C. Print results
+        print(f"\n{name}:")
+        print(f"  Raw Features: {features}")
+        print(f"  Normalized Features: { {k: f'{v:.2f}' for k, v in normalized_features_dict.items()} }")
+        print(f"  -> Classified as GCS Level: {level}")
