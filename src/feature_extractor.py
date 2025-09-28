@@ -152,8 +152,7 @@ if __name__ == "__main__":
 
     if lm_tokenizer and lm_model:
 
-        # S
-        # hould have low perplexity.
+        # Should have low perplexity.
         ppl_1 = calculate_perplexity(test_case_1, lm_tokenizer, lm_model)
         
         # "Word salad" with real words should have very high perplexity.

@@ -1,6 +1,7 @@
 from faster_whisper import WhisperModel
 import time 
 
+
 def initialize_whisper_model(model_size="base", device="cpu", compute_type="int8"):
     """
     Initializes and loads the FasterWhisper model.
@@ -56,13 +57,12 @@ def transcribe_chunk(audio_chunk_waveform, whisper_model, language="de"):
             print("Whisper detected no speech in this chunk.")
             return {
                 'text': '',
-                'avg_logprob': -99.0, # Use a very low logprob to indicate no speech
+                'avg_logprob': -99.0, # We use a very low logprob to indicate no speech
                 'no_speech_prob': 1.0, # High probability of no speech
                 'transcription_time_s': transcription_time
             }
 
         # For a single chunk, we'll just process the first detected segment.
-        # ToDo: Handle multiple segments later
         first_segment = segment_results[0]
         
         result_dict = {
@@ -83,9 +83,7 @@ def transcribe_chunk(audio_chunk_waveform, whisper_model, language="de"):
 if __name__ == "__main__":
     import os
     import numpy as np
-    # Ensure the src directory is in the path for imports
     import sys
-    # Add the parent directory of 'src' to the path
     sys.path.append(os.path.join(os.path.dirname(__file__), '..'))
     
     from src.audio_utils import load_audio, initialize_vad_model, get_speech_timestamps
